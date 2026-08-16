@@ -50,6 +50,9 @@ assf put     profile.assf ChannelsReport local.xml   # replace with a local file
 assf report-channels profile.assf             # show Channels Report channels
 assf add-report-channel profile.assf "GPS Speed" --oper 2
 assf remove-report-channel profile.assf "GPS Speed" --oper 2   # omit --oper to drop all entries
+assf check   profile.assf                     # stale page dirs / index collisions
+assf clean   profile.assf [--dry-run]         # drop unregistered page trees
+assf latest  [DIR]                            # newest version per profile (what RS3 loads)
 ```
 
 Inner paths accept a unique substring; ambiguous matches list the candidates.
@@ -58,10 +61,45 @@ For `--oper`, copy the code from an existing entry that computes the same
 statistic (`assf report-channels` shows them; the values look like min/max
 variants but the enum is AIM's and undocumented).
 
+## How Race Studio 3 actually uses these files
+
+Field notes from tracing RS3 v3.83.48's file I/O (things that will bite you):
+
+- **RS3 loads the highest-timestamp `<profile>.<ts>.assf`** in
+  `profiles-available` — and it **silently writes new versions during profile
+  loads**, not only on explicit saves. The "newest file" moves around while
+  the app runs. Always run `assf latest` before editing; the modifying
+  commands warn when a newer version of the same profile exists, because an
+  edit to an older version has no visible effect.
+- **Page registration** is the `<Layouts>` list in `Profile.xml`
+  (`<Layout Idx="N" ...>Name</Layout>`); each registered page maps to a
+  top-level `N - Name/` directory. A stale directory sharing an index with a
+  registered page makes RS3 **silently drop that page at load** — the classic
+  "my added page never saves" symptom. `assf check` finds this; `assf clean`
+  fixes it.
+- **Plotted-channel visibility** (which channels are graphed) lives in each
+  page's top-level `Layout-<Page>.xml` as `<PlotVisible>true` — *not* in the
+  nested panel XMLs, which typically list every channel as false.
+- **Channels Report** entries are `<MainChan>` blocks in
+  `.../ChannelsReport.xml`; a running RS3 picks up edits to this file, while
+  layout/visibility edits need a full app restart.
+- **Partial-save bug** (present in 3.83.48): a normal "Save profile" only
+  serializes the first page and `Profile.xml`, dragging every other page
+  along stale — edits on other pages are silently lost. Adding or removing a
+  page forces a full clean rewrite of all pages (also purging stale trees).
+- `profiles-current/<N>/` folders are per-analysis working copies. RS3 strips
+  key files from them on exit; old slots can preserve historical state (e.g.
+  a channel selection lost from every archive) — useful for recovery, via
+  `assf put`.
+
 ## Safety
 
-- Every modifying command first copies the archive to
-  `<name>.bak-YYYYmmdd_HHMMSS` (disable with `--no-backup`).
+- Every modifying command first copies the archive into an `assf-backups/`
+  subfolder next to it (disable with `--no-backup`). Backups deliberately
+  live outside `profiles-available`'s flat namespace so neither RS3's
+  profile scan nor a human can mistake them for live versions.
+- Modifying commands warn when the target is not the newest version of its
+  profile (RS3 only reads the newest).
 - Archives are replaced atomically (temp file + rename).
 - Edited XML is checked for well-formedness before repacking; malformed input
   leaves the archive untouched.
