@@ -74,7 +74,8 @@ variants but the enum is AIM's and undocumented).
 
 ## Caveats
 
-- Race Studio 3's exact load behavior for non-first pages is still being
-  mapped out; keep the automatic backups until you've confirmed the app picks
-  up your edit.
-- Tested on Race Studio 3 v3.83.48 profile archives.
+- Confirmed working on Race Studio 3 v3.83.48: Channels Report edits made
+  with this tool are picked up by the app — even while it is running.
+- The app may still overwrite an externally edited archive if you use its own
+  "Save profile" afterwards (its save bug re-serializes only the first page);
+  re-check with `assf report-channels` after saving from the app.
