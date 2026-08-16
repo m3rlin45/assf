@@ -67,6 +67,10 @@ variants but the enum is AIM's and undocumented).
 - Warns if Race Studio 3 is running (WSL: checked via `tasklist.exe`).
   **Close Race Studio 3 before editing archives it may be using.**
 
+## License
+
+[MIT](LICENSE)
+
 ## Caveats
 
 - Race Studio 3's exact load behavior for non-first pages is still being
