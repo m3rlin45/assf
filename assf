@@ -21,6 +21,10 @@ Commands:
                                           append a MainChan to the Channels Report
     assf remove-report-channel ARCHIVE NAME [--oper N]
                                           remove Channels Report entries
+    assf check   ARCHIVE                  report stale page dirs / index
+                                          collisions vs Profile.xml Layouts
+    assf clean   ARCHIVE [--dry-run]      remove page dirs not registered in
+                                          Profile.xml (fixes silent page drops)
 
 Every modifying command first copies the archive to ARCHIVE.bak-YYYYmmdd_HHMMSS
 (disable with --no-backup) and then replaces it atomically. Close Race Studio 3
@@ -232,6 +236,93 @@ def cmd_add_report_channel(args):
     print(f"added <MainChan> {args.name} (Oper={args.oper}) to {name}")
 
 
+def get_layouts(prof_xml):
+    """Return {idx: page_name} registered in Profile.xml's <Layouts> list."""
+    return {int(m.group(1)): m.group(2) for m in re.finditer(
+        r'<Layout Idx="(\d+)" Type="\d+">([^<]*)</Layout>', prof_xml)}
+
+
+def cmd_check(args):
+    with open_zip(args.archive) as zf:
+        names = zf.namelist()
+        try:
+            prof = zf.read("Profile.xml").decode("utf-8", "replace")
+        except KeyError:
+            die("archive has no Profile.xml")
+    layouts = get_layouts(prof)
+    tops = sorted({n.split("/")[0] for n in names if "/" in n})
+    issues = 0
+    for top in tops:
+        m = re.match(r"(\d+) - (.*)$", top)
+        if not m:
+            continue
+        idx, page = int(m.group(1)), m.group(2)
+        if layouts.get(idx) != page:
+            kind = ("COLLISION with active '%s'" % layouts[idx]
+                    if idx in layouts else "unregistered leftover")
+            print(f"  stale: {top}/  ({kind})")
+            issues += 1
+    for idx, page in sorted(layouts.items()):
+        if f"{idx} - {page}" not in tops:
+            print(f"  MISSING: registered page {idx}:{page} has no directory")
+            issues += 1
+    print(f"{len(layouts)} registered pages, {len(tops)} page dirs, "
+          f"{issues} issue(s)")
+    sys.exit(1 if issues else 0)
+
+
+def cmd_clean(args):
+    with open_zip(args.archive) as zf:
+        names = zf.namelist()
+        try:
+            prof = zf.read("Profile.xml").decode("utf-8", "replace")
+        except KeyError:
+            die("archive has no Profile.xml")
+    layouts = get_layouts(prof)
+    if not layouts:
+        die("no <Layout> entries found in Profile.xml; refusing to clean")
+    keep_tops = {f"{i} - {p}" for i, p in layouts.items()}
+    drop = []
+    for n in names:
+        top = n.split("/")[0] if "/" in n else None
+        if top and re.match(r"\d+ - ", top) and top not in keep_tops:
+            drop.append(n)
+    if not drop:
+        print("archive is already clean; nothing to remove")
+        return
+    for top in sorted({n.split("/")[0] for n in drop}):
+        print(f"  removing {top}/")
+    if args.dry_run:
+        print(f"dry run: would remove {len(drop)} files")
+        return
+    # rewrite() replaces content; removal needs its own pass
+    warn_if_rs3_running()
+    with zipfile.ZipFile(args.archive, "r") as zf:
+        infos = [i for i in zf.infolist() if i.filename not in set(drop)]
+        data = {i.filename: zf.read(i) for i in infos}
+    if not args.no_backup:
+        bak = f"{args.archive}.bak-{time.strftime('%Y%m%d_%H%M%S')}"
+        shutil.copy2(args.archive, bak)
+        print(f"backup: {bak}")
+    fd, tmp = tempfile.mkstemp(
+        dir=os.path.dirname(os.path.abspath(args.archive)), suffix=".assf.tmp")
+    os.close(fd)
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as out:
+            for info in infos:
+                new = zipfile.ZipInfo(info.filename)
+                new.compress_type = zipfile.ZIP_DEFLATED
+                new.external_attr = info.external_attr
+                new.date_time = info.date_time
+                out.writestr(new, data[info.filename])
+        os.replace(tmp, args.archive)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    print(f"removed {len(drop)} files; wrote {args.archive}")
+
+
 def cmd_remove_report_channel(args):
     with open_zip(args.archive) as zf:
         name = find_channels_report(zf)
@@ -285,6 +376,10 @@ def main():
                       "help": "operation code; copy the value from an existing "
                               "entry doing the same stat (see report-channels)"}),
         modifies=True)
+    add("check", cmd_check)
+    sp_clean = add("clean", cmd_clean, modifies=True)
+    sp_clean.add_argument("--dry-run", action="store_true",
+                          help="show what would be removed without writing")
     add("remove-report-channel", cmd_remove_report_channel,
         (["name"], {"help": "channel name exactly as shown by report-channels"}),
         (["--oper"], {"type": int,
