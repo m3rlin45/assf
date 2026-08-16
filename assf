@@ -25,6 +25,18 @@ Commands:
                                           collisions vs Profile.xml Layouts
     assf clean   ARCHIVE [--dry-run]      remove page dirs not registered in
                                           Profile.xml (fixes silent page drops)
+    assf latest  [DIR]                    print the newest version of each
+                                          profile — the file RS3 actually loads
+
+RS3 behavior notes (learned the hard way; see README for the full story):
+  - RS3 loads the highest-timestamp <profile>.<ts>.assf and silently writes
+    NEW versions during profile loads, so "the newest file" moves around.
+    Always run `assf latest` before editing; modifying commands warn if a
+    newer version of the same profile exists.
+  - Plotted-channel visibility lives in each page's top-level Layout-*.xml
+    (`<PlotVisible>true`), not in the nested panel XMLs.
+  - Channels Report edits are picked up by a running RS3; layout/visibility
+    edits require a full app restart to take effect.
 
 Every modifying command first copies the archive to ARCHIVE.bak-YYYYmmdd_HHMMSS
 (disable with --no-backup) and then replaces it atomically. Close Race Studio 3
@@ -32,6 +44,7 @@ before editing archives it may be using.
 """
 
 import argparse
+import glob
 import os
 import re
 import shutil
@@ -84,10 +97,56 @@ def warn_if_rs3_running():
               "or ignore your edit — close it first.", file=sys.stderr)
 
 
+VERSION_RE = r"(.*)\.(\d{8}_\d{6})\.assf$"
+
+
+def newest_version(archive):
+    """Return (newest_path, is_stale) for the profile this archive belongs to.
+
+    RS3 loads the highest-timestamp <profile>.<ts>.assf in the folder, and it
+    silently writes NEW versions during profile loads (not only on explicit
+    saves) — so the newest file moves around. Editing anything but the newest
+    version has no effect on what RS3 shows.
+    """
+    m = re.match(VERSION_RE, os.path.basename(archive))
+    if not m:
+        return None, False
+    d = os.path.dirname(os.path.abspath(archive))
+    best, best_ts = os.path.abspath(archive), m.group(2)
+    for p in glob.glob(os.path.join(d, glob.escape(m.group(1)) + ".*.assf")):
+        mm = re.match(VERSION_RE, os.path.basename(p))
+        if mm and mm.group(2) > best_ts:
+            best, best_ts = p, mm.group(2)
+    return best, os.path.abspath(archive) != best
+
+
+def warn_if_stale_version(archive):
+    newest, stale = newest_version(archive)
+    if stale:
+        print(f"WARNING: this is NOT the newest version of the profile — "
+              f"RS3 loads {os.path.basename(newest)}. Your edit will have no "
+              f"visible effect unless you edit that file instead.",
+              file=sys.stderr)
+
+
+def make_backup(archive):
+    """Back up into an assf-backups/ subfolder — never alongside the archives,
+    so RS3's profile scanning (and humans) can't confuse backups with live
+    versions."""
+    bdir = os.path.join(os.path.dirname(os.path.abspath(archive)),
+                        "assf-backups")
+    os.makedirs(bdir, exist_ok=True)
+    bak = os.path.join(bdir, os.path.basename(archive)
+                       + ".bak-" + time.strftime("%Y%m%d_%H%M%S"))
+    shutil.copy2(archive, bak)
+    print(f"backup: {bak}")
+
+
 def rewrite(archive, replacements, backup=True):
     """Rewrite the archive with {inner_name: bytes} replaced, preserving
     entry order, compression, and the timestamps of untouched entries."""
     warn_if_rs3_running()
+    warn_if_stale_version(archive)
     with zipfile.ZipFile(archive, "r") as zf:
         infos = zf.infolist()
         data = {i.filename: zf.read(i) for i in infos}
@@ -96,9 +155,7 @@ def rewrite(archive, replacements, backup=True):
         die(f"entries not present in archive: {sorted(unknown)}")
 
     if backup:
-        bak = f"{archive}.bak-{time.strftime('%Y%m%d_%H%M%S')}"
-        shutil.copy2(archive, bak)
-        print(f"backup: {bak}")
+        make_backup(archive)
 
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(archive)),
                                suffix=".assf.tmp")
@@ -242,6 +299,19 @@ def get_layouts(prof_xml):
         r'<Layout Idx="(\d+)" Type="\d+">([^<]*)</Layout>', prof_xml)}
 
 
+def cmd_latest(args):
+    d = args.dir or "."
+    newest = {}
+    for p in glob.glob(os.path.join(d, "*.assf")):
+        m = re.match(VERSION_RE, os.path.basename(p))
+        if m and (m.group(1) not in newest or m.group(2) > newest[m.group(1)][0]):
+            newest[m.group(1)] = (m.group(2), p)
+    if not newest:
+        die(f"no versioned .assf files in {d}")
+    for name in sorted(newest, key=str.lower):
+        print(newest[name][1])
+
+
 def cmd_check(args):
     with open_zip(args.archive) as zf:
         names = zf.namelist()
@@ -297,13 +367,12 @@ def cmd_clean(args):
         return
     # rewrite() replaces content; removal needs its own pass
     warn_if_rs3_running()
+    warn_if_stale_version(args.archive)
     with zipfile.ZipFile(args.archive, "r") as zf:
         infos = [i for i in zf.infolist() if i.filename not in set(drop)]
         data = {i.filename: zf.read(i) for i in infos}
     if not args.no_backup:
-        bak = f"{args.archive}.bak-{time.strftime('%Y%m%d_%H%M%S')}"
-        shutil.copy2(args.archive, bak)
-        print(f"backup: {bak}")
+        make_backup(args.archive)
     fd, tmp = tempfile.mkstemp(
         dir=os.path.dirname(os.path.abspath(args.archive)), suffix=".assf.tmp")
     os.close(fd)
@@ -376,6 +445,10 @@ def main():
                       "help": "operation code; copy the value from an existing "
                               "entry doing the same stat (see report-channels)"}),
         modifies=True)
+    sp_latest = sub.add_parser("latest")
+    sp_latest.add_argument("dir", nargs="?",
+                           help="profiles-available directory (default: .)")
+    sp_latest.set_defaults(fn=cmd_latest)
     add("check", cmd_check)
     sp_clean = add("clean", cmd_clean, modifies=True)
     sp_clean.add_argument("--dry-run", action="store_true",
