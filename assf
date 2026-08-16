@@ -19,6 +19,8 @@ Commands:
     assf report-channels ARCHIVE          show the Channels Report channel list
     assf add-report-channel ARCHIVE NAME --oper N
                                           append a MainChan to the Channels Report
+    assf remove-report-channel ARCHIVE NAME [--oper N]
+                                          remove Channels Report entries
 
 Every modifying command first copies the archive to ARCHIVE.bak-YYYYmmdd_HHMMSS
 (disable with --no-backup) and then replaces it atomically. Close Race Studio 3
@@ -27,6 +29,7 @@ before editing archives it may be using.
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -229,6 +232,26 @@ def cmd_add_report_channel(args):
     print(f"added <MainChan> {args.name} (Oper={args.oper}) to {name}")
 
 
+def cmd_remove_report_channel(args):
+    with open_zip(args.archive) as zf:
+        name = find_channels_report(zf)
+        raw = zf.read(name).decode("utf-8")
+    oper = str(args.oper) if args.oper is not None else "[^<]*"
+    pattern = re.compile(
+        r"[ \t]*<MainChan>\s*<Name>%s</Name>\s*<Oper>%s</Oper>\s*</MainChan>[ \t]*\n?"
+        % (re.escape(args.name), oper))
+    updated, count = pattern.subn("", raw)
+    if count == 0:
+        die(f"no MainChan entry matching Name='{args.name}'"
+            + (f" Oper={args.oper}" if args.oper is not None else "")
+            + f" in {name}")
+    ET.fromstring(updated)  # sanity check
+    rewrite(args.archive, {name: updated.encode("utf-8")},
+            backup=not args.no_backup)
+    print(f"removed {count} MainChan entr{'y' if count == 1 else 'ies'} "
+          f"for '{args.name}' from {name}")
+
+
 def main():
     p = argparse.ArgumentParser(
         prog="assf", description=__doc__,
@@ -261,6 +284,12 @@ def main():
         (["--oper"], {"required": True, "type": int,
                       "help": "operation code; copy the value from an existing "
                               "entry doing the same stat (see report-channels)"}),
+        modifies=True)
+    add("remove-report-channel", cmd_remove_report_channel,
+        (["name"], {"help": "channel name exactly as shown by report-channels"}),
+        (["--oper"], {"type": int,
+                      "help": "only remove the entry with this operation code; "
+                              "omit to remove all entries for the channel"}),
         modifies=True)
 
     args = p.parse_args()
