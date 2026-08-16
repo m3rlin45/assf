@@ -49,6 +49,7 @@ assf edit    profile.assf ChannelsReport      # open in $EDITOR, repack
 assf put     profile.assf ChannelsReport local.xml   # replace with a local file
 assf report-channels profile.assf             # show Channels Report channels
 assf add-report-channel profile.assf "GPS Speed" --oper 2
+assf remove-report-channel profile.assf "GPS Speed" --oper 2   # omit --oper to drop all entries
 ```
 
 Inner paths accept a unique substring; ambiguous matches list the candidates.
